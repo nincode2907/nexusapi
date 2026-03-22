@@ -1,0 +1,169 @@
+import prisma from "@/lib/prisma";
+
+// ─────────────────────────────────────────────
+// Billing Service
+// Handles credit calculation, deduction, and
+// usage logging via atomic Prisma transactions.
+// Supports Prompt Caching: cached input tokens
+// are charged at 5% of base input price.
+// ─────────────────────────────────────────────
+
+// Transaction client type derived from the PrismaClient instance
+type TransactionClient = Parameters<
+  Parameters<typeof prisma.$transaction>[0]
+>[0];
+
+// Fallback pricing when a model is not found in ModelPricing table
+// Priced conservatively high to avoid under-charging
+const DEFAULT_PRICING = {
+  priceInPerToken: 0.000015, // ~$15/1M input tokens equivalent
+  priceOutPerToken: 0.00006, // ~$60/1M output tokens equivalent
+};
+
+// Cached tokens are charged at 5% of the base input price
+const CACHE_DISCOUNT_RATE = 0.05;
+
+export interface BillingResult {
+  success: boolean;
+  totalCost: number;
+  cachedCost: number; // How much was charged for cached tokens
+  creditSaved: number; // How much credit the user saved thanks to caching
+  modelFound: boolean;
+  error?: string;
+}
+
+/**
+ * Process billing for a completed API request.
+ *
+ * 1. Fetches ModelPricing for the given model (falls back to defaults).
+ * 2. Splits input tokens into uncached vs cached.
+ * 3. Calculates total cost:
+ *    (uncachedTokens × priceIn) + (cachedTokens × priceIn × 5%) + (completionTokens × priceOut)
+ * 4. Atomically deducts credits from User and inserts a UsageLog record.
+ *
+ * Designed to be called fire-and-forget after streaming completes.
+ */
+export async function processBilling(
+  apiKeyId: string,
+  userId: string,
+  modelName: string,
+  promptTokens: number,
+  completionTokens: number,
+  cachedTokens: number,
+  durationMs?: number
+): Promise<BillingResult> {
+  try {
+    // ── Step 1: Fetch model pricing ────────────────
+    const pricing = await prisma.modelPricing.findUnique({
+      where: { modelId: modelName },
+    });
+
+    let modelFound = true;
+    let priceIn = DEFAULT_PRICING.priceInPerToken;
+    let priceOut = DEFAULT_PRICING.priceOutPerToken;
+    let priceCached = priceIn;
+
+    if (pricing && pricing.isActive) {
+      priceIn = pricing.priceInPerToken;
+      priceOut = pricing.priceOutPerToken;
+      priceCached = pricing.priceCachedPerToken ?? (priceIn * CACHE_DISCOUNT_RATE);
+    } else {
+      modelFound = false;
+      // Fallback: treat ALL tokens as uncached for conservative billing
+      cachedTokens = 0;
+      console.warn(
+        `[Billing] Model pricing not found for "${modelName}". ` +
+        `Using fallback: in=${priceIn}, out=${priceOut}, cachedTokens forced to 0`
+      );
+    }
+
+    // ── Step 2: Calculate costs with cache discount ──
+    // Ensure cachedTokens never exceeds promptTokens
+    cachedTokens = Math.min(cachedTokens, promptTokens);
+    const uncachedTokens = promptTokens - cachedTokens;
+
+    const uncachedCost = uncachedTokens * priceIn;
+    const cachedCost = cachedTokens * priceCached;
+    const outputCost = completionTokens * priceOut;
+    const totalCost = uncachedCost + cachedCost + outputCost;
+
+    // How much user saved compared to paying full price for all input tokens
+    const creditSaved = cachedTokens * priceIn - cachedCost;
+
+    // Guard: Skip billing if cost is effectively zero
+    if (totalCost <= 0) {
+      console.warn(
+        `[Billing] Zero-cost request for model "${modelName}". ` +
+        `Tokens: total=${promptTokens}, cached=${cachedTokens}, out=${completionTokens}. Skipping.`
+      );
+      return { success: true, totalCost: 0, cachedCost: 0, creditSaved: 0, modelFound };
+    }
+
+    // ── Step 3: Atomic transaction ────────────────
+    // Deduct credits + insert usage log in a single transaction
+    await prisma.$transaction(async (tx: TransactionClient) => {
+      // 3a. Deduct credits from user balance
+      const updatedUser = await tx.user.update({
+        where: { id: userId },
+        data: {
+          totalCredit: { decrement: totalCost },
+        },
+        select: { totalCredit: true },
+      });
+
+      // Log if balance goes negative (still allow — settle later)
+      if (updatedUser.totalCredit <= 0) {
+        console.warn(
+          `[Billing] User ${userId} balance went negative: ` +
+          `${updatedUser.totalCredit.toFixed(6)} credits. ` +
+          `Consider blocking future requests.`
+        );
+      }
+
+      // 3b. Insert usage log (now includes cachedTokens & creditSaved)
+      await tx.usageLog.create({
+        data: {
+          userId,
+          apiKeyId,
+          modelName,
+          promptTokens,
+          completionTokens,
+          cachedTokens,
+          totalCostCredit: totalCost,
+          creditSaved,
+          duration: durationMs ?? null,
+        },
+      });
+    });
+
+    // 3c. Update API key's lastUsed timestamp (non-critical, outside tx)
+    prisma.apiKey
+      .update({
+        where: { id: apiKeyId },
+        data: { lastUsed: new Date() },
+      })
+      .catch((err: Error) => {
+        console.error("[Billing] Failed to update apiKey.lastUsed:", err);
+      });
+
+    console.log(
+      `[Billing] Charged user=${userId} model=${modelName} ` +
+      `tokens=[total=${promptTokens}, cached=${cachedTokens}, uncached=${uncachedTokens}, out=${completionTokens}] ` +
+      `cost=${totalCost.toFixed(6)} saved=${creditSaved.toFixed(6)}`
+    );
+
+    return { success: true, totalCost, cachedCost, creditSaved, modelFound };
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "Unknown billing error";
+    console.error(`[Billing] FAILED for user=${userId}:`, message);
+    return {
+      success: false,
+      totalCost: 0,
+      cachedCost: 0,
+      creditSaved: 0,
+      modelFound: false,
+      error: message,
+    };
+  }
+}
