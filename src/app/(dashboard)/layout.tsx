@@ -2,20 +2,21 @@ import { redirect } from "next/navigation";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import Link from "next/link";
-import { 
-  Zap, 
-  LayoutDashboard, 
-  Box, 
-  Key, 
-  CreditCard, 
-  BookOpen, 
+import {
+  Zap,
+  LayoutDashboard,
+  Box,
+  Key,
+  CreditCard,
+  BookOpen,
   LifeBuoy,
-  User as UserIcon,
   Plus
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { SidebarNav } from "./SidebarNav";
+import { BalanceDisplay } from "./BalanceDisplay";
+import UserNav from "./UserNav";
 
 export default async function DashboardLayout({
   children,
@@ -46,7 +47,7 @@ export default async function DashboardLayout({
             NexusAPI
           </Link>
         </div>
-        
+
         <div className="flex-1 py-6 px-4 flex flex-col gap-1 overflow-y-auto">
           <SidebarNav />
         </div>
@@ -74,21 +75,14 @@ export default async function DashboardLayout({
                 <Zap className="w-4 h-4" />
               </div>
             </div>
-            <div className="text-sm font-medium text-muted-foreground hidden sm:flex items-center gap-2">
-              Số dư:{" "}
-              <Badge variant="secondary" className="font-bold text-foreground bg-muted/50 hover:bg-muted/80 transition-colors">
-                {Math.max(0, Math.floor(user?.totalCredit || 0)).toLocaleString("vi-VN")} cr
-              </Badge>
-            </div>
+            <BalanceDisplay initialCredit={user?.totalCredit || 0} />
             <Button size="sm" className="bg-primary text-primary-foreground shadow-sm font-medium h-8 rounded-md px-4 cursor-pointer hover:bg-primary/90 hover:shadow-md hover:scale-101 active:scale-99 transition-all duration-200">
               <Plus className="w-3.5 h-3.5 mr-1.5 stroke-[3]" />
               Nạp Credits
             </Button>
           </div>
           <div className="flex items-center">
-            <div className="w-8 h-8 rounded-full bg-muted flex items-center justify-center border border-border/60 cursor-pointer hover:bg-muted/80 transition-colors">
-              <UserIcon className="w-4 h-4 text-muted-foreground" />
-            </div>
+            <UserNav email={user?.email} name={user?.name} />
           </div>
         </header>
         <main className="flex-1 overflow-y-auto bg-muted/20">

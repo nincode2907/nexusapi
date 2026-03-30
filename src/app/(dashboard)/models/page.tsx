@@ -20,12 +20,12 @@ export default async function ModelsPage() {
     ]
   });
 
-  // Enrich with fallback status and random usage count
+  // Enrich with fallback status and real usage count
   const enhancedModels = rawModels.map((model: any) => {
     const modelIdLower = (model.modelId || "").toLowerCase();
     let badge = model.badge || null;
     let badgeColor = model.badgeColor || null;
-    let usageCount = model.usageCount || 0;
+    const usageCount = model.usageCount || 0; // Luôn dùng dữ liệu thực từ DB
 
     if (!badge && (modelIdLower.includes("gpt-4o") || modelIdLower.includes("claude-3-5"))) { 
       badge = "HOT"; 
@@ -33,10 +33,6 @@ export default async function ModelsPage() {
     } else if (!badge && (modelIdLower.includes("mini") || modelIdLower.includes("flash") || modelIdLower.includes("qwq"))) { 
       badge = "NEW"; 
       badgeColor = "#8b5cf6"; 
-    }
-
-    if (!usageCount) {
-       usageCount = Math.floor(Math.random() * 50000) + (modelIdLower.includes("gpt") || modelIdLower.includes("claude") ? 50000 : 0);
     }
 
     return { ...model, badge, badgeColor, usageCount };

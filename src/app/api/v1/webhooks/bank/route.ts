@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
+import { updateUserCredit } from "@/services/ledger.service";
 
 // ─────────────────────────────────────────────
 // POST /api/v1/webhooks/bank
@@ -42,19 +43,17 @@ function calculateCredits(amountVnd: number): {
 }
 
 /**
- * Extract user ID from bank transfer description.
- * Users are instructed to include "NEXUS <userId>" in the memo.
- * Example: "NEXUS clu8a9bcd0001..." or "Chuyen tien NEXUS clu8a9bcd"
+ * Extract an ID (Transaction ID or User ID) from bank transfer description.
+ * Users are instructed to include "NEXUS [ID]" in the memo.
  */
-function extractUserIdFromDescription(description: string): string | null {
+function extractIdFromDescription(description: string): string | null {
   if (!description) return null;
 
   // Case-insensitive match for "NEXUS" followed by a whitespace then the ID
-  // The ID is a cuid (alphanumeric, ~25 chars) — capture it greedily
+  // Captures alphanumeric IDs of length 10 or more (cuid, etc.)
   const match = description.toUpperCase().match(/NEXUS\s*([A-Z0-9]{10,})/i);
   if (!match) return null;
 
-  // Return lowercase (cuids are lowercase)
   return match[1].toLowerCase();
 }
 
@@ -74,7 +73,7 @@ export async function POST(request: NextRequest) {
   const authHeader = request.headers.get("authorization");
   const customHeader = request.headers.get("x-webhook-secret");
   const providedSecret =
-    authHeader?.replace(/^Bearer\s+/i, "").trim() ||
+    authHeader?.replace(/^(Bearer|Apikey)\s+/i, "").trim() ||
     customHeader?.trim();
 
   if (providedSecret !== webhookSecret) {
@@ -133,7 +132,7 @@ export async function POST(request: NextRequest) {
   if (existingTx) {
     console.warn(
       `[Webhook/Bank] Duplicate transaction detected: ref=${bankRefCode}. ` +
-        `Already processed for user=${existingTx.userId}. Skipping.`
+      `Already processed for user=${existingTx.userId}. Skipping.`
     );
     return NextResponse.json({
       success: true,
@@ -142,85 +141,125 @@ export async function POST(request: NextRequest) {
     });
   }
 
-  // ── Step 4: Identify user from description ─────
-  const userId = extractUserIdFromDescription(description);
+  // ── Step 4: Identify Transaction or User from description ─────
+  const extractedId = extractIdFromDescription(description);
 
-  if (!userId) {
+  if (!extractedId) {
     console.error(
-      `[Webhook/Bank] ⚠ ORPHANED PAYMENT: Could not extract user ID from description. ` +
-        `ref=${bankRefCode} amount=${amountVnd} desc="${description}". ` +
-        `Admin must resolve manually.`
+      `[Webhook/Bank] ⚠ ORPHANED PAYMENT: Could not extract ID from description. ` +
+      `ref=${bankRefCode} amount=${amountVnd} desc="${description}".`
     );
-    // Return 200 to acknowledge receipt — log for admin resolution
-    return NextResponse.json({
-      success: true,
-      message: "Acknowledged but user not identified. Admin will resolve.",
-    });
+    return NextResponse.json({ success: true, message: "ID not found in description" });
   }
 
-  // Verify user exists in database
-  const user = await prisma.user.findUnique({
-    where: { id: userId },
-    select: { id: true, email: true, name: true },
+  // 4a. Check if it's a Transaction ID
+  let targetTransaction = await prisma.transaction.findUnique({
+    where: { id: extractedId },
+    include: { user: true },
   });
 
-  if (!user) {
-    console.error(
-      `[Webhook/Bank] ⚠ ORPHANED PAYMENT: User not found in DB. ` +
-        `userId=${userId} ref=${bankRefCode} amount=${amountVnd}. ` +
-        `Admin must resolve manually.`
-    );
-    return NextResponse.json({
-      success: true,
-      message: "Acknowledged but user not found. Admin will resolve.",
-    });
+  // 🚨 VÁ LỖ HỔNG 2: Nếu hóa đơn này đã THANH TOÁN rồi (khách chuyển nhồi vào mã cũ)
+  // -> Ta hủy bỏ targetTransaction để ép hệ thống rơi xuống Step 4b (Tạo hóa đơn mới)
+  if (targetTransaction && targetTransaction.status !== "PENDING") {
+    console.warn(`[Webhook/Bank] Tx ${extractedId} already completed. Treating as generic top-up.`);
+    targetTransaction = null;
   }
 
-  // ── Step 5: Calculate credits with bonus ───────
-  const { baseCredit, bonusRate, finalCredit } = calculateCredits(amountVnd);
+  let targetUser = targetTransaction?.user || null;
+  let creditToAdd = targetTransaction?.creditAdded || 0;
 
-  // ── Step 6: Atomic database transaction ────────
+  // 🚨 VÁ LỖ HỔNG 1: Chống nạp thiếu tiền (Underpayment check)
+  if (targetTransaction && amountVnd !== targetTransaction.amountVnd) {
+    console.warn(
+      `[Webhook/Bank] ⚠ SAI LỆCH TIỀN: Khách tạo đơn ${targetTransaction.amountVnd}đ nhưng chuyển ${amountVnd}đ. ` +
+      `Sẽ tự động tính lại Credit theo số tiền thực tế nhận được.`
+    );
+    // Tính lại Credit dựa trên số tiền thật sự ngân hàng báo về
+    const { finalCredit } = calculateCredits(amountVnd);
+    creditToAdd = finalCredit;
+  }
+
+  // 4b. Fallback: Check if it's a User ID (Trường hợp khách tự chuyển không tạo đơn trước)
+  if (!targetTransaction) {
+    targetUser = await prisma.user.findUnique({
+      where: { id: extractedId },
+    });
+
+    if (targetUser) {
+      const { finalCredit } = calculateCredits(amountVnd);
+      creditToAdd = finalCredit;
+    }
+  }
+
+  if (!targetUser) {
+    console.error(
+      `[Webhook/Bank] ⚠ ORPHANED PAYMENT: No matching user or transaction found for ID: ${extractedId}. ` +
+      `ref=${bankRefCode} amount=${amountVnd}.`
+    );
+    return NextResponse.json({ success: true, message: "User/Transaction not found" });
+  }
+
+  const { baseCredit, bonusRate } = calculateCredits(amountVnd);
+
+  // ── Step 5: Atomic database transaction ────────
   try {
     const result = await prisma.$transaction(async (tx: TransactionClient) => {
-      // 6a. Create transaction record
-      const newTx = await tx.transaction.create({
-        data: {
-          userId: user.id,
-          amountVnd: amountVnd,
-          creditAdded: finalCredit,
-          type: "TOPUP",
-          status: "COMPLETED",
-          refCode: bankRefCode,
-          metadata: {
-            source: "vietqr_webhook",
-            description,
-            baseCredit,
-            bonusRate,
-            bonusLabel: bonusRate > 0 ? `+${(bonusRate * 100).toFixed(0)}%` : "none",
-            processedAt: new Date().toISOString(),
+      let finalTx;
+
+      // 5a. Update existing or create NEW transaction record
+      if (targetTransaction) {
+        finalTx = await tx.transaction.update({
+          where: { id: targetTransaction.id },
+          data: {
+            status: "COMPLETED",
+            refCode: bankRefCode,
+            amountVnd: amountVnd,         // Cập nhật lại số tiền thật đã nhận (nếu khách lươn lẹo nạp thiếu)
+            creditAdded: creditToAdd,     // Cập nhật lại số Credit thật đã cộng
+            metadata: {
+              ...(typeof targetTransaction.metadata === 'object' && targetTransaction.metadata !== null ? targetTransaction.metadata : {}),
+              webhook_processed_at: new Date().toISOString(),
+              bank_ref: bankRefCode,
+              original_order_amount: targetTransaction.amountVnd // Lưu lại dấu vết khách nạp thiếu
+            }
+          }
+        });
+      } else {
+        finalTx = await tx.transaction.create({
+          data: {
+            userId: targetUser!.id,
+            amountVnd: amountVnd,
+            creditAdded: creditToAdd,
+            type: "TOPUP",
+            status: "COMPLETED",
+            refCode: bankRefCode,
+            metadata: {
+              source: "vietqr_webhook_fallback",
+              description,
+              baseCredit,
+              bonusRate,
+              processedAt: new Date().toISOString(),
+            },
           },
-        },
-      });
+        });
+      }
 
-      // 6b. Increment user's credit balance
-      const updatedUser = await tx.user.update({
-        where: { id: user.id },
-        data: {
-          totalCredit: { increment: finalCredit },
-        },
-        select: { totalCredit: true },
-      });
+      // 5b. Ghi sổ cái + cộng credit (qua Ledger Service)
+      const ledgerResult = await updateUserCredit(
+        targetUser!.id,
+        creditToAdd,
+        "DEPOSIT",
+        `Nạp tiền tự động qua VietQR — ${amountVnd.toLocaleString()}đ (ref: ${bankRefCode})`,
+        finalTx.id,
+        tx  // Truyền transaction context để tránh nested transaction
+      );
 
-      return { transaction: newTx, newBalance: updatedUser.totalCredit };
+      return { transaction: finalTx, newBalance: ledgerResult.newBalance };
     });
 
     console.log(
-      `[Webhook/Bank] ✅ TOP-UP SUCCESS: user=${user.id} (${user.email}) ` +
-        `amount=${amountVnd.toLocaleString()}đ → ` +
-        `base=${baseCredit.toFixed(2)} + bonus=${(bonusRate * 100).toFixed(0)}% = ` +
-        `${finalCredit.toFixed(2)} credits. ` +
-        `New balance: ${result.newBalance.toFixed(2)} credits. ` +
-        `ref=${bankRefCode}`
+      `[Webhook/Bank] ✅ TOP-UP SUCCESS: user=${targetUser.id} (${targetUser.email}) ` +
+      `amount=${amountVnd.toLocaleString()}đ → creditAdded=${creditToAdd.toFixed(2)}. ` +
+      `New balance: ${result.newBalance.toFixed(2)}. ref=${bankRefCode}`
     );
 
     return NextResponse.json({
@@ -229,15 +268,14 @@ export async function POST(request: NextRequest) {
       data: {
         transactionId: result.transaction.id,
         amountVnd,
-        creditAdded: finalCredit,
-        bonusRate: `${(bonusRate * 100).toFixed(0)}%`,
+        creditAdded: creditToAdd,
         newBalance: result.newBalance,
       },
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
     console.error(
-      `[Webhook/Bank] ❌ TRANSACTION FAILED: user=${user.id} ref=${bankRefCode}:`,
+      `[Webhook/Bank] ❌ TRANSACTION FAILED: user=${targetUser!.id} ref=${bankRefCode}:`,
       message
     );
 

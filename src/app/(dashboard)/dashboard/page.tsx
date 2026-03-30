@@ -14,6 +14,8 @@ import {
   ShieldAlert
 } from "lucide-react";
 import CacheGauge from "./CacheGauge";
+import RedeemCard from "./RedeemCard";
+import EmergencyBanner from "./EmergencyBanner";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 
@@ -30,7 +32,7 @@ export default async function DashboardPage() {
   }
   const userId = session.user.id;
 
-  const [user, topModels, usageStats] = await Promise.all([
+  const [user, topModels, usageStats, activePromo] = await Promise.all([
     prisma.user.findUnique({
       where: { id: userId },
       include: {
@@ -52,6 +54,21 @@ export default async function DashboardPage() {
       where: { apiKey: { userId } },
       _sum: { promptTokens: true, cachedTokens: true, creditSaved: true },
       _count: { id: true }
+    }),
+    prisma.giftCode.findFirst({
+      where: {
+        isActive: true,
+        OR: [
+          { expiresAt: null },
+          { expiresAt: { gt: new Date() } }
+        ]
+      },
+      orderBy: { createdAt: "desc" },
+      include: {
+        redeems: {
+          where: { userId: userId }
+        }
+      }
     })
   ]);
 
@@ -62,13 +79,43 @@ export default async function DashboardPage() {
   const totalRequests = usageStats._count?.id || 0;
   const totalSaved = usageStats._sum?.creditSaved || 0;
   const cacheHitRate = totalInputTokens > 0 ? (cachedTokens / totalInputTokens) * 100 : 0;
-  const inputSavingsPercent = 95;
+  let promoData = null;
+  if (activePromo) {
+    const hasClaimed = activePromo.redeems.length > 0;
+
+    if (!hasClaimed) {
+      const realRemaining = activePromo.maxUses - activePromo.usedCount;
+
+      if (realRemaining > 0) {
+        // VÁ LỖ HỔNG 2: Tự động co giãn số ảo (FOMO Dynamic Scale)
+        // Thay vì fix cứng 32, ta cho hiển thị ảo = 15% tổng số mã (Tối thiểu là 10 mã).
+        const FOMO_RATIO = 0.15;
+        const dynamicFakeStart = Math.max(10, Math.ceil(activePromo.maxUses * FOMO_RATIO));
+
+        // Tính toán số hiển thị (Giảm dần theo tỷ lệ thực tế)
+        let displayRemaining = Math.ceil((realRemaining / activePromo.maxUses) * dynamicFakeStart);
+
+        // Chặn an toàn: Đảm bảo số ảo không bao giờ lớn hơn số thật (trường hợp sắp hết sạch mã)
+        displayRemaining = Math.min(displayRemaining, realRemaining);
+
+        promoData = {
+          code: activePromo.code,
+          usesLeft: displayRemaining,
+          expiresAt: activePromo.expiresAt ? activePromo.expiresAt.toISOString() : null,
+          reward: activePromo.creditReward,
+          total: dynamicFakeStart
+        };
+      }
+    }
+  }
 
   return (
     <div className="space-y-6">
+      <EmergencyBanner promoData={promoData} />
+
       <div className="flex flex-col gap-1 mb-2">
-        <h1 className="text-2xl font-bold tracking-tight text-foreground/90">Tổng quan</h1>
-        <p className="text-muted-foreground text-sm">Theo dõi chi phí, hiệu suất cache và quản lý API keys.</p>
+        <h1 className="text-2xl font-bold tracking-tight text-foreground/90">Tổng quan hệ thống</h1>
+        <p className="text-muted-foreground text-sm">Theo dõi chi phí sử dụng, hiệu suất cache và trạng thái các API key của bạn.</p>
       </div>
 
       {user.totalCredit < 0 && (
@@ -83,12 +130,12 @@ export default async function DashboardPage() {
         </div>
       )}
 
-      <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-2">
+      <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
         <Card className="rounded-xl border-border/60 shadow-sm bg-gradient-to-br from-emerald-50 to-white dark:from-emerald-950/20 dark:to-background overflow-hidden relative">
           <CardHeader className="flex flex-row items-center justify-between pb-2">
             <div className="space-y-1">
-              <CardTitle className="text-base font-semibold text-emerald-800 dark:text-emerald-400">Cache Hit Rate</CardTitle>
-              <p className="text-xs text-muted-foreground">Prompt Caching Performance</p>
+              <CardTitle className="text-base font-semibold text-emerald-800 dark:text-emerald-400">Tỷ lệ cache hit</CardTitle>
+              <p className="text-xs text-muted-foreground">Hiệu suất Prompt Caching</p>
             </div>
             <Zap className="w-4 h-4 text-emerald-500" />
           </CardHeader>
@@ -96,10 +143,10 @@ export default async function DashboardPage() {
             <CacheGauge hitRate={cacheHitRate} />
             <div className="mt-4 text-center">
               <p className="text-sm font-semibold text-foreground/90">
-                {formatNumber(cachedTokens)} / {formatNumber(totalInputTokens)} Input Tokens
+                {formatNumber(cachedTokens)} / {formatNumber(totalInputTokens)} token đầu vào
               </p>
               <p className="text-xs text-muted-foreground mt-1">
-                Được phục vụ từ Memory Cache trong tổng số {totalRequests} requests
+                Được phục vụ từ bộ nhớ cache trên tổng số {totalRequests} request
               </p>
             </div>
           </CardContent>
@@ -108,8 +155,8 @@ export default async function DashboardPage() {
         <Card className="rounded-xl border-border/60 shadow-sm bg-background flex flex-col">
           <CardHeader className="flex flex-row items-center justify-between pb-2">
             <div className="space-y-1">
-              <CardTitle className="text-base font-semibold">Credits Đã Tiết Kiệm</CardTitle>
-              <p className="text-xs text-muted-foreground">Nhờ vào Prompt Caching</p>
+              <CardTitle className="text-base font-semibold">Chi phí đã tiết kiệm</CardTitle>
+              <p className="text-xs text-muted-foreground">Nhờ cơ chế Prompt Caching</p>
             </div>
             <TrendingDown className="w-4 h-4 text-emerald-500" />
           </CardHeader>
@@ -118,23 +165,27 @@ export default async function DashboardPage() {
               {totalSaved.toLocaleString("vi-VN", { maximumFractionDigits: 2 })} credits
             </div>
             <p className="text-sm text-emerald-700/80 dark:text-emerald-300/80 mt-2">
-              Lượng chi phí được giữ lại hoàn toàn tự động nhờ cơ chế Prompt Caching.
+              Bạn đã tiết kiệm được {totalSaved.toLocaleString("vi-VN", { maximumFractionDigits: 2 })} credits nhờ Prompt Caching.
             </p>
-            <div className="mt-7 space-y-2">
+            {/* <div className="mt-7 space-y-2">
               <div className="flex justify-between text-xs font-semibold text-emerald-700 dark:text-emerald-400">
                 <span>Input Caching Discount:</span>
                 <span className="px-2 py-0.5 rounded-full bg-emerald-100 dark:bg-emerald-500/20">giảm {inputSavingsPercent}%</span>
               </div>
-            </div>
+            </div> */}
           </CardContent>
         </Card>
+
+        <div id="redeem-input-focus" className="h-full">
+          <RedeemCard promoData={promoData} />
+        </div>
       </div>
 
       <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-2">
         <Card className="rounded-xl border-border/60 shadow-sm bg-background flex flex-col">
           <CardHeader className="flex flex-row items-center justify-between pb-2">
             <div className="space-y-1">
-              <CardTitle className="text-base font-semibold">Top Models</CardTitle>
+              <CardTitle className="text-base font-semibold">Model phổ biến</CardTitle>
             </div>
             <Cpu className="w-4 h-4 text-muted-foreground/60" />
           </CardHeader>
@@ -163,7 +214,7 @@ export default async function DashboardPage() {
         <Card className="rounded-xl border-border/60 shadow-sm bg-background flex flex-col">
           <CardHeader className="flex flex-row items-center justify-between pb-2">
             <div className="space-y-1">
-              <CardTitle className="text-base font-semibold">Active API Keys</CardTitle>
+              <CardTitle className="text-base font-semibold">API key đang hoạt động</CardTitle>
             </div>
             <Key className="w-4 h-4 text-muted-foreground/60" />
           </CardHeader>
@@ -171,7 +222,7 @@ export default async function DashboardPage() {
             <div className="space-y-2 mb-4">
               {user.apiKeys.length === 0 ? (
                 <div className="text-sm text-center py-6 text-muted-foreground border border-dashed rounded-lg">
-                  No active keys found.
+                  Chưa có API key nào.
                 </div>
               ) : (
                 user.apiKeys.map((k: { id: string; name: string | null; maskedKey: string }) => (
@@ -184,8 +235,8 @@ export default async function DashboardPage() {
             </div>
             <div className="mt-auto flex justify-end">
               <Link href="/api-keys">
-                <Button variant="ghost" size="sm" className="text-muted-foreground hover:text-foreground pr-0">
-                  View all API keys <ArrowRight className="w-4 h-4 ml-1.5" />
+                <Button variant="ghost" size="sm" className="text-muted-foreground hover:text-foreground pr-0 cursor-pointer">
+                  Xem tất cả API key <ArrowRight className="w-4 h-4 ml-1.5" />
                 </Button>
               </Link>
             </div>

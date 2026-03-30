@@ -68,6 +68,14 @@ function createStreamInterceptor(
   const decoder = new TextDecoder();
   let buffer = ""; // Leftover partial line from previous chunk
   let usage: UsageData | null = null;
+  let usageReported = false;
+
+  const reportUsage = () => {
+    if (usage && !usageReported) {
+      usageReported = true;
+      onUsageFound(usage);
+    }
+  };
 
   return new ReadableStream<Uint8Array>({
     async start(controller) {
@@ -79,9 +87,7 @@ function createStreamInterceptor(
 
           if (done) {
             // Stream ended — fire billing if we found usage
-            if (usage) {
-              onUsageFound(usage);
-            }
+            reportUsage();
             controller.close();
             break;
           }
@@ -106,7 +112,7 @@ function createStreamInterceptor(
 
             // [DONE] signal — finalize billing with whatever we have
             if (trimmed === "data: [DONE]") {
-              if (usage) onUsageFound(usage);
+              reportUsage();
               continue;
             }
 
@@ -133,18 +139,14 @@ function createStreamInterceptor(
         }
       } catch (error) {
         // If we found usage before the error, still bill
-        if (usage) {
-          onUsageFound(usage);
-        }
+        reportUsage();
         controller.error(error);
       }
     },
 
     cancel() {
       // Client disconnected — still bill if we found usage
-      if (usage) {
-        onUsageFound(usage);
-      }
+      reportUsage();
     },
   });
 }
@@ -160,7 +162,7 @@ export async function POST(request: NextRequest) {
 
   if (!apiKeyRaw) {
     return errorResponse(
-      "Missing or invalid API key. Expected: Authorization: Bearer sk-nexus-xxx",
+      "Thiếu hoặc sai API key. Vui lòng kiểm tra lại.",
       401,
       "authentication_error"
     );
@@ -184,7 +186,7 @@ export async function POST(request: NextRequest) {
 
   if (!apiKeyRecord || apiKeyRecord.status !== "ACTIVE") {
     return errorResponse(
-      "Invalid or revoked API key.",
+      "API key không hợp lệ hoặc đã bị thu hồi.",
       401,
       "authentication_error"
     );
@@ -195,8 +197,8 @@ export async function POST(request: NextRequest) {
 
   if (user.totalCredit <= 0) {
     return errorResponse(
-      `Insufficient credits. Your balance is ${user.totalCredit.toFixed(4)} credits. ` +
-      `Please top up at https://nexusapi.vn/billing`,
+      `Không đủ credits. Số dư của bạn là ${user.totalCredit.toFixed(4)} credits. ` +
+      `Vui lòng nạp thêm tại https://nexusapi.vn/billing`,
       402,
       "insufficient_credits"
     );
@@ -212,7 +214,7 @@ export async function POST(request: NextRequest) {
 
   if (!body.model || !body.messages) {
     return errorResponse(
-      "Missing required fields: 'model' and 'messages'.",
+      "Thiếu required fields: 'model' and 'messages'.",
       400
     );
   }
@@ -222,6 +224,15 @@ export async function POST(request: NextRequest) {
   const modelPricing = await prisma.modelPricing.findUnique({
     where: { modelId: modelNameRequested }
   });
+
+  // Strict Model Validation: Only allow models in ModelPricing (unless user is ADMIN)
+  if (!modelPricing && user.role !== "ADMIN") {
+    return errorResponse(
+      `Mô hình '${modelNameRequested}' hiện chưa được hỗ trợ. Vui lòng liên hệ quản trị viên hoặc sử dụng mô hình trong danh mục.`,
+      400,
+      "unsupported_model"
+    );
+  }
 
   // ── Step D.2: Overdraft Protection — throttle max_tokens ──
   // Prevent low-balance users from requesting massive generations
@@ -297,10 +308,9 @@ export async function POST(request: NextRequest) {
           usage.prompt_tokens,
           usage.completion_tokens,
           usage.cached_tokens,
-          durationMs
-        ).catch((err) => {
-          console.error("[Route] Async billing failed:", err);
-        });
+          durationMs,
+          200  // Stream luôn thành công nếu có usage
+        ).catch(console.error);
       }
     );
 
@@ -333,10 +343,9 @@ export async function POST(request: NextRequest) {
         responseData.usage.prompt_tokens || 0,
         responseData.usage.completion_tokens || 0,
         cachedTokens,
-        durationMs
-      ).catch((err) => {
-        console.error("[Route] Async billing failed:", err);
-      });
+        durationMs,
+        200
+      ).catch(console.error);
     }
 
     return NextResponse.json(responseData, {

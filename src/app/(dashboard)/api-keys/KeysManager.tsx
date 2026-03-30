@@ -187,9 +187,9 @@ export default function KeysManager({ initialKeys }: { initialKeys: ApiKey[] }) 
                   <Button variant="outline" onClick={() => handleOpenChange(false)} className="cursor-pointer">
                     Hủy
                   </Button>
-                  <Button 
-                    onClick={handleGenerateKey} 
-                    disabled={loading || !keyName.trim()} 
+                  <Button
+                    onClick={handleGenerateKey}
+                    disabled={loading || !keyName.trim()}
                     className="cursor-pointer"
                   >
                     Tạo API Key
@@ -205,12 +205,12 @@ export default function KeysManager({ initialKeys }: { initialKeys: ApiKey[] }) 
         <Table>
           <TableHeader className="bg-muted/30">
             <TableRow>
-              <TableHead className="font-semibold text-xs text-muted-foreground tracking-wider uppercase">Tên</TableHead>
-              <TableHead className="font-semibold text-xs text-muted-foreground tracking-wider uppercase">Trạng thái</TableHead>
-              <TableHead className="font-semibold text-xs text-muted-foreground tracking-wider uppercase">API Key</TableHead>
-              <TableHead className="font-semibold text-xs text-muted-foreground tracking-wider uppercase">Ngày tạo</TableHead>
-              <TableHead className="font-semibold text-xs text-muted-foreground tracking-wider uppercase">Lần sử dụng cuối</TableHead>
-              <TableHead className="text-right font-semibold text-xs text-muted-foreground tracking-wider uppercase">Hành động</TableHead>
+              <TableHead className="font-semibold text-xs text-muted-foreground tracking-wider">Tên</TableHead>
+              <TableHead className="font-semibold text-xs text-muted-foreground tracking-wider">Trạng thái</TableHead>
+              <TableHead className="font-semibold text-xs text-muted-foreground tracking-wider">API Key</TableHead>
+              <TableHead className="font-semibold text-xs text-muted-foreground tracking-wider">Ngày tạo</TableHead>
+              <TableHead className="font-semibold text-xs text-muted-foreground tracking-wider">Lần sử dụng cuối</TableHead>
+              <TableHead className="text-right font-semibold text-xs text-muted-foreground tracking-wider">Hành động</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>

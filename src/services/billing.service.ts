@@ -1,9 +1,11 @@
 import prisma from "@/lib/prisma";
+import { updateUserCredit } from "@/services/ledger.service";
 
 // ─────────────────────────────────────────────
-// Billing Service
-// Handles credit calculation, deduction, and
-// usage logging via atomic Prisma transactions.
+// Billing Service (Kế Toán API Usage)
+// Handles credit calculation, deduction, usage
+// logging, and ledger recording via atomic
+// Prisma transactions.
 // Supports Prompt Caching: cached input tokens
 // are charged at 5% of base input price.
 // ─────────────────────────────────────────────
@@ -39,9 +41,14 @@ export interface BillingResult {
  * 2. Splits input tokens into uncached vs cached.
  * 3. Calculates total cost:
  *    (uncachedTokens × priceIn) + (cachedTokens × priceIn × 5%) + (completionTokens × priceOut)
- * 4. Atomically deducts credits from User and inserts a UsageLog record.
+ * 4. Atomically:
+ *    - Inserts a UsageLog record
+ *    - Deducts credits via Ledger Service (ghi sổ cái)
+ *    - Increments model usage count
  *
  * Designed to be called fire-and-forget after streaming completes.
+ *
+ * @param errorMessage - Error message from upstream (nếu statusCode != 200)
  */
 export async function processBilling(
   apiKeyId: string,
@@ -50,7 +57,9 @@ export async function processBilling(
   promptTokens: number,
   completionTokens: number,
   cachedTokens: number,
-  durationMs?: number
+  durationMs?: number,
+  statusCode: number = 200,
+  errorMessage?: string
 ): Promise<BillingResult> {
   try {
     // ── Step 1: Fetch model pricing ────────────────
@@ -100,28 +109,10 @@ export async function processBilling(
     }
 
     // ── Step 3: Atomic transaction ────────────────
-    // Deduct credits + insert usage log in a single transaction
+    // UsageLog + Ledger + Model usage count — all in one transaction
     await prisma.$transaction(async (tx: TransactionClient) => {
-      // 3a. Deduct credits from user balance
-      const updatedUser = await tx.user.update({
-        where: { id: userId },
-        data: {
-          totalCredit: { decrement: totalCost },
-        },
-        select: { totalCredit: true },
-      });
-
-      // Log if balance goes negative (still allow — settle later)
-      if (updatedUser.totalCredit <= 0) {
-        console.warn(
-          `[Billing] User ${userId} balance went negative: ` +
-          `${updatedUser.totalCredit.toFixed(6)} credits. ` +
-          `Consider blocking future requests.`
-        );
-      }
-
-      // 3b. Insert usage log (now includes cachedTokens & creditSaved)
-      await tx.usageLog.create({
+      // 3a. Insert usage log (bao gồm cachedTokens, creditSaved, errorMessage)
+      const usageLog = await tx.usageLog.create({
         data: {
           userId,
           apiKeyId,
@@ -132,11 +123,31 @@ export async function processBilling(
           totalCostCredit: totalCost,
           creditSaved,
           duration: durationMs ?? null,
+          statusCode,
+          errorMessage: errorMessage ?? null,
         },
       });
+
+      // 3b. Trừ tiền qua Ledger Service (ghi sổ cái kế toán kép)
+      await updateUserCredit(
+        userId,
+        -totalCost,  // Số âm = trừ tiền
+        "USAGE",
+        `Gọi API ${modelName} — ${promptTokens + completionTokens} tokens`,
+        usageLog.id, // referenceId = UsageLog ID
+        tx  // Truyền transaction context
+      );
+
+      // 3c. Increment model usage count (if model exists in ModelPricing)
+      if (pricing) {
+        await tx.modelPricing.update({
+          where: { id: pricing.id },
+          data: { usageCount: { increment: 1 } },
+        });
+      }
     });
 
-    // 3c. Update API key's lastUsed timestamp (non-critical, outside tx)
+    // 3d. Update API key's lastUsed timestamp (non-critical, outside tx)
     prisma.apiKey
       .update({
         where: { id: apiKeyId },

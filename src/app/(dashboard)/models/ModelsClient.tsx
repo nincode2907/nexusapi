@@ -23,7 +23,7 @@ interface ModelsClientProps {
 export const PROVIDER_MAP: Record<string, { label: string; icon: React.ReactNode; color: string }> = {
   // 1. Các Filter Logic (Không có trong DB, tự chế ra để thao túng tâm lý)
   "ALL": { label: "Tất cả", icon: <Flame className="w-4 h-4 text-orange-500" />, color: "bg-orange-100 text-orange-800" },
-  "FREE": { label: "Miễn Phí - Giảm Giá", icon: <Gift className="w-4 h-4 text-red-500" />, color: "bg-red-50 text-red-700" },
+  "FREE": { label: "Ưu đãi", icon: <Gift className="w-4 h-4 text-red-500" />, color: "bg-red-50 text-red-700" },
 
   // 2. Các Hãng AI (Khớp 100% với cột provider trong Database)
   "OpenAI": { label: "OpenAI", icon: <OpenAILogo className="w-4 h-4" />, color: "border-gray-200" },
@@ -95,10 +95,11 @@ export default function ModelsClient({ models }: ModelsClientProps) {
   return (
     <div className="space-y-6 max-w-7xl mx-auto pb-10">
       <div className="flex flex-col gap-2 pb-2">
-        <h1 className="text-3xl font-bold tracking-tight">Siêu thị Models</h1>
+        <h1 className="text-3xl font-bold tracking-tight">Thư viện Model AI</h1>
         <p className="text-sm text-muted-foreground w-full max-w-3xl leading-relaxed mt-1">
-          Khám phá danh sách các mô hình AI mạnh mẽ nhất được hỗ trợ bởi NexusAPI.
-          Tìm kiếm nhanh chóng, lọc theo biểu giá và khả năng xử lý.
+          Khám phá các model AI được hỗ trợ bởi NexusAPI.
+          <br />
+          So sánh giá, context và khả năng xử lý để chọn model phù hợp.
         </p>
       </div>
 
@@ -140,7 +141,7 @@ export default function ModelsClient({ models }: ModelsClientProps) {
         </Link>
         <div className="shrink-0">
           <Select value={sortBy} onValueChange={(val) => val && setSortBy(val)}>
-            <SelectTrigger className="w-auto min-w-[240px] bg-background border border-border/70 shadow-[0_2px_8px_rgba(0,0,0,0.04)] rounded-2xl h-[38px] px-4 hover:bg-muted/40 active:scale-[0.97] transition-all duration-150 font-medium text-[13px] text-foreground">
+            <SelectTrigger className="w-auto min-w-[240px] bg-background border border-border/70 shadow-[0_2px_8px_rgba(0,0,0,0.04)] rounded-2xl h-[38px] px-4 hover:bg-muted/40 active:scale-[0.97] transition-all duration-150 font-medium text-[13px] text-foreground cursor-pointer">
               {SORT_LABEL[sortBy as keyof typeof SORT_LABEL]}
             </SelectTrigger>
             <SelectContent align="end" className="rounded-2xl border border-border/50 shadow-xl min-w-[240px] p-1.5 backdrop-blur-xl bg-background/95">
@@ -165,21 +166,13 @@ export default function ModelsClient({ models }: ModelsClientProps) {
           const features = model.features || [];
 
           return (
-            <div key={model.id} className="border border-border/50 rounded-2xl p-4 bg-background shadow-sm hover:shadow-md transition-all flex flex-col justify-between h-full group">
+            <div key={model.id} className="border border-border/50 rounded-3xl p-5 bg-background shadow-sm hover:shadow-xl hover:border-primary/20 transition-all duration-300 flex flex-col justify-between h-full group relative overflow-hidden">
               <div>
-                {/* Top Row: Provider + Name & Badge */}
-                <div className="flex justify-between items-start mb-2.5">
-                  <div className="flex items-center gap-2 overflow-hidden pr-2">
-                    <div className="text-foreground shrink-0 mt-0.5" title={model.provider || "Khác"}>
-                      {getProviderInfo(model.provider || "Khác").icon}
-                    </div>
-                    <h3 className="font-bold text-base truncate leading-tight group-hover:text-primary transition-colors" title={model.displayName || model.modelId}>
-                      {model.displayName || model.modelId}
-                    </h3>
-                  </div>
+                {/* 1. Top Row: Badge only (Right aligned) */}
+                <div className="flex justify-end h-6 mb-1">
                   {model.badge && (
                     <Badge
-                      className="text-[10px] px-2 py-0 border-0 font-black tracking-wider shrink-0 shadow-sm h-5"
+                      className="rounded-full px-3 py-0.5 text-[10px] font-black uppercase tracking-widest shadow-sm border-0"
                       style={{ backgroundColor: model.badgeColor || '#6366f1', color: '#fff' }}
                     >
                       {model.badge}
@@ -187,8 +180,18 @@ export default function ModelsClient({ models }: ModelsClientProps) {
                   )}
                 </div>
 
-                {/* Description */}
-                <p className="text-[13px] text-muted-foreground line-clamp-2 min-h-[38px] leading-relaxed mb-4">
+                {/* 2. Provider + Name Row (Now BELOW the badge) */}
+                <div className="flex items-center gap-3 mb-4">
+                  <div className="text-foreground shrink-0 transform group-hover:scale-110 transition-transform duration-300" title={model.provider || "Khác"}>
+                    {getProviderInfo(model.provider || "Khác").icon}
+                  </div>
+                  <h3 className="font-extrabold text-lg truncate leading-tight tracking-tight group-hover:text-primary transition-colors" title={model.displayName || model.modelId}>
+                    {model.displayName || model.modelId}
+                  </h3>
+                </div>
+
+                {/* 3. Description */}
+                <p className="text-[13.5px] text-muted-foreground/90 leading-relaxed line-clamp-3 min-h-[40px] mb-5">
                   {model.description}
                 </p>
 
@@ -217,11 +220,23 @@ export default function ModelsClient({ models }: ModelsClientProps) {
                     <>
                       <div className="flex flex-col text-center flex-1 border-r border-border/60">
                         <span className="text-[9px] uppercase font-bold text-muted-foreground/70 mb-0.5">Input</span>
-                        <span className="text-xs font-bold text-foreground"> ~ {Math.round(model.priceInPerToken * 1000000).toLocaleString('vi-VN')} <span className="font-normal text-muted-foreground/80">cr/1M</span></span>
+                        <span className="text-xs font-bold text-foreground">
+                          {model.priceInPerToken === 0 ? (
+                            <span className="text-red-600">Miễn phí</span>
+                          ) : (
+                            <>~ {Math.round(model.priceInPerToken * 1000000).toLocaleString('vi-VN')} <span className="font-normal text-muted-foreground/80">cr/1M</span></>
+                          )}
+                        </span>
                       </div>
                       <div className="flex flex-col text-center flex-1">
                         <span className="text-[9px] uppercase font-bold text-muted-foreground/70 mb-0.5">Output</span>
-                        <span className="text-xs font-bold text-foreground"> ~ {Math.round(model.priceOutPerToken * 1000000).toLocaleString('vi-VN')} <span className="font-normal text-muted-foreground/80">cr/1M</span></span>
+                        <span className="text-xs font-bold text-foreground">
+                          {model.priceOutPerToken === 0 ? (
+                            <span className="text-red-600">Miễn phí</span>
+                          ) : (
+                            <>~ {Math.round(model.priceOutPerToken * 1000000).toLocaleString('vi-VN')} <span className="font-normal text-muted-foreground/80">cr/1M</span></>
+                          )}
+                        </span>
                       </div>
                     </>
                   )}

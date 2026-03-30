@@ -9,7 +9,8 @@ import {
   Box,
   Key,
   CreditCard,
-  BookOpen
+  BookOpen,
+  Activity
 } from "lucide-react";
 
 export function SidebarNav() {
@@ -17,8 +18,9 @@ export function SidebarNav() {
 
   const links = [
     { href: "/dashboard", label: "Tổng quan", icon: LayoutDashboard },
-    { href: "/models", label: "Siêu thị Models", icon: Box },
+    { href: "/models", label: "Thư viện Model AI", icon: Box },
     { href: "/api-keys", label: "API Keys", icon: Key },
+    { href: "/usage", label: "Thống kê sử dụng", icon: Activity },
     { href: "/billing", label: "Thanh toán", icon: CreditCard },
     { href: "/docs", label: "Tài liệu", icon: BookOpen },
   ];

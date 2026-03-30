@@ -27,6 +27,8 @@ model User {
   image        String?
   role         UserRole @default(USER)
   totalCredit  Float    @default(0) @map("total_credit")
+  totalDeposit Float    @default(0) @map("total_deposit")
+  totalSpent   Float    @default(0) @map("total_spent")
   createdAt    DateTime @default(now()) @map("created_at")
   updatedAt    DateTime @updatedAt @map("updated_at")
 
@@ -36,6 +38,8 @@ model User {
   apiKeys      ApiKey[]
   transactions Transaction[]
   usageLogs    UsageLog[]
+  userGiftCodes UserGiftCode[]
+  creditLedgers CreditLedger[]
 
   @@map("users")
 }
@@ -62,7 +66,6 @@ model ApiKey {
   user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
   usageLogs UsageLog[]
 
-  @@index([hashedKey])
   @@index([userId])
   @@map("api_keys")
 }
@@ -73,12 +76,46 @@ model ApiKey {
 enum TransactionType {
   TOPUP
   AFFILIATE
+  GIFT
 }
 
 enum TransactionStatus {
   PENDING
   COMPLETED
   FAILED
+}
+
+// ── BẢNG LƯU MÃ QUÀ TẶNG ──
+model GiftCode {
+  id           String    @id @default(cuid())
+  code         String    @unique @map("code") // VD: NEXUS2026 (Ép In hoa)
+  creditReward Float     @map("credit_reward") // Số điểm tặng (VD: 20000)
+  
+  maxUses      Int       @default(1) @map("max_uses") // Giới hạn số người nhập (VD: 100)
+  usedCount    Int       @default(0) @map("used_count") // Đã có bao nhiêu người nhập
+  
+  expiresAt    DateTime? @map("expires_at") // Ngày hết hạn (Tùy chọn)
+  isActive     Boolean   @default(true) @map("is_active")
+  createdAt    DateTime  @default(now()) @map("created_at")
+
+  redeems      UserGiftCode[]
+
+  @@map("gift_codes")
+}
+
+model UserGiftCode {
+  id           String   @id @default(cuid())
+  userId       String   @map("user_id")
+  giftCodeId   String   @map("gift_code_id")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  giftCode     GiftCode @relation(fields: [giftCodeId], references: [id], onDelete: Cascade)
+
+  // 🚨 KHÓA CHỐNG SPAM LỚP 1: Một User ID chỉ được ghép cặp với 1 GiftCode ID ĐÚNG 1 LẦN
+  @@unique([userId, giftCodeId]) 
+  
+  @@map("user_gift_codes")
 }
 
 model Transaction {
@@ -114,17 +151,44 @@ model UsageLog {
   totalCostCredit  Float    @map("total_cost_credit")
   creditSaved      Float    @default(0) @map("credit_saved")
   duration         Int?     // Response time in ms
+  statusCode       Int      @default(200) @map("status_code")
+  errorMessage     String?  @db.Text @map("error_message")
   createdAt        DateTime @default(now()) @map("created_at")
 
   // Relations
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
   apiKey ApiKey  @relation(fields: [apiKeyId], references: [id], onDelete: Cascade)
 
-  @@index([userId])
+  @@index([userId, createdAt(sort: Desc)])
   @@index([apiKeyId])
   @@index([modelName])
-  @@index([createdAt])
+
   @@map("usage_logs")
+}
+
+enum LedgerType {
+  DEPOSIT       // Khách nạp tiền (Từ Transaction)
+  USAGE         // Khách xài API (Từ UsageLog)
+  PROMO         // Nhận từ GiftCode
+  REFUND        // Hoàn tiền do lỗi
+  SYSTEM        // Admin can thiệp tay
+}
+
+model CreditLedger {
+  id            String      @id @default(cuid())
+  userId        String      @map("user_id")
+  amount        Float       // Số credit thay đổi (+ là cộng, - là trừ)
+  balanceAfter  Float       @map("balance_after") // Số dư ví NGAY SAU KHI giao dịch (Traceback)
+  type          LedgerType
+  description   String?     // VD: "Nạp tiền VietQR", "Gọi GPT-4o", "Nhập mã NEXUS2026"
+  referenceId   String?     @map("reference_id") // ID của Transaction/UsageLog/GiftCode liên quan
+  createdAt     DateTime    @default(now()) @map("created_at")
+
+  // Relations
+  user          User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@map("credit_ledger")
 }
 
 // ─────────────────────────────────────────────
@@ -136,6 +200,8 @@ model ModelPricing {
   displayName         String?  @map("display_name")         // Bắt buộc giữ: Tên hiển thị UI (VD: GPT-4o Mini)
   
   // -- Giá cả --
+  costInPerToken      Float?   @default(0) @map("cost_in_per_token")  // Giá gốc sếp mua của Hãng
+  costOutPerToken     Float?   @default(0) @map("cost_out_per_token") // Giá gốc sếp mua của Hãng
   priceInPerToken     Float    @map("price_in_per_token")
   priceCachedPerToken Float?   @default(0) @map("price_cached_per_token")
   priceOutPerToken    Float    @map("price_out_per_token")
@@ -158,6 +224,17 @@ model ModelPricing {
   updatedAt           DateTime @updatedAt @map("updated_at")
 
   @@map("model_pricing")
+}
+
+// Bảng cấu hình các gói nạp (Sếp có thể thêm bớt trên trang Admin sau này)
+model TopupPackage {
+  id          String   @id @default(cuid())
+  name        String   // VD: "Gói Khởi Nghiệp", "Gói Cá Mập"
+  priceVnd    Int      // Số tiền VNĐ khách phải chuyển (VD: 50000)
+  creditAmnt  Float    // Số Credit thực nhận (VD: 50000)
+  bonusCredit Float    @default(0) // Kích cầu: Tặng thêm 10% (VD: 5000)
+  isActive    Boolean  @default(true) // Ẩn/Hiện gói nạp
+  createdAt   DateTime @default(now())
 }
 
 // ─────────────────────────────────────────────
